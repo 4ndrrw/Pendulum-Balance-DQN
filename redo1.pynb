@@ -1,0 +1,155 @@
+!pip install gym==0.17.3
+!pip install matplotlib
+!pip install tensorflow==2.10
+
+import gym
+import numpy as np
+import tensorflow as tf
+from collections import deque
+import random
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.optimizers import Adam
+
+
+# Set seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Create Pendulum environment and discretize action space
+env = gym.make('Pendulum-v0')
+state_size = env.observation_space.shape[0]
+num_actions = 11
+action_bins = np.linspace(-2, 2, num_actions)
+
+# DQN model
+def build_model(input_dim, output_dim):
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(64, activation='relu', input_shape=(input_dim,)),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(output_dim)
+    ])
+    return model
+
+# Hyperparameters
+gamma = 0.99
+epsilon = 1.0
+epsilon_min = 0.01
+epsilon_decay = 0.995
+learning_rate = 0.001
+batch_size = 64
+episodes = 500
+memory = deque(maxlen=50000)
+
+# Build models
+main_model = build_model(state_size, num_actions)
+target_model = build_model(state_size, num_actions)
+optimizer = tf.keras.optimizers.Adam(learning_rate)
+
+def update_target_model():
+    target_model.set_weights(main_model.get_weights())
+
+def get_action(state, epsilon):
+    if np.random.rand() < epsilon:
+        return np.random.randint(num_actions)
+    q_values = main_model.predict(np.array([state]), verbose=0)
+    return np.argmax(q_values[0])
+
+def replay():
+    minibatch = random.sample(memory, batch_size)
+    states, next_states = [], []
+    for state, action, reward, next_state, done in minibatch:
+        states.append(state)
+        next_states.append(next_state)
+
+    states = np.array(states)
+    next_states = np.array(next_states)
+
+    next_qs = target_model.predict(next_states, verbose=0)
+    max_next_qs = np.max(next_qs, axis=1)
+
+    target_qs = main_model.predict(states, verbose=0)
+
+    for i, (state, action, reward, next_state, done) in enumerate(minibatch):
+        target_qs[i][action] = reward if done else reward + gamma * max_next_qs[i]
+
+    with tf.GradientTape() as tape:
+        q_preds = main_model(states)
+        loss = tf.keras.losses.MSE(target_qs, q_preds)
+    grads = tape.gradient(loss, main_model.trainable_variables)
+    optimizer.apply_gradients(zip(grads, main_model.trainable_variables))
+
+    return float(tf.reduce_mean(loss))
+
+update_target_model()
+reward_history = []
+
+for ep in range(episodes):
+    state = env.reset()
+    total_reward = 0
+    for t in range(200):
+        action_idx = get_action(state, epsilon)
+        action = [action_bins[action_idx]]
+        next_state, reward, done, _ = env.step(action)
+        memory.append((state, action_idx, reward, next_state, done))
+        state = next_state
+        total_reward += reward
+
+        if len(memory) > batch_size:
+            replay()
+
+    epsilon = max(epsilon_min, epsilon_decay * epsilon)
+    reward_history.append(total_reward)
+    if ep % 10 == 0:
+        update_target_model()
+        print(f"Episode {ep}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}")
+
+env.close()
+
+import matplotlib.pyplot as plt
+
+# Plotting
+def plot_rewards(rewards, window=10, target=-200):
+    smoothed = np.convolve(rewards, np.ones(window)/window, mode='valid')
+    plt.plot(smoothed, label='Smoothed Reward')
+    plt.axhline(target, color='r', linestyle='--', label='Target')
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.title('Training Performance')
+    plt.legend()
+    plt.show()
+
+# Modified training loop with reward printing and early stopping
+reward_history = []
+
+for ep in range(episodes):
+    state = env.reset()
+    total_reward = 0
+    for t in range(200):
+        action_idx = get_action(state, epsilon)
+        action = [action_bins[action_idx]]
+        next_state, reward, done, _ = env.step(action)
+        memory.append((state, action_idx, reward, next_state, done))
+        state = next_state
+        total_reward += reward
+
+        if len(memory) > batch_size:
+            replay()
+
+    epsilon = max(epsilon_min, epsilon_decay * epsilon)
+    reward_history.append(total_reward)
+
+    avg_reward_5 = np.mean(reward_history[-5:]) if len(reward_history) >= 5 else total_reward
+    avg_reward_total = np.mean(reward_history)
+    print(f"Episode {ep}, Reward: {total_reward:.2f}, Epsilon: {epsilon:.3f}, "
+          f"Avg (All): {avg_reward_total:.2f}, Avg (Last 5): {avg_reward_5:.2f}")
+
+    if ep % 10 == 0:
+        update_target_model()
+
+    if avg_reward_5 > -200:
+        print(f"Early stopping at episode {ep}: Last 5 episodes average reward = {avg_reward_5:.2f}")
+        break
+
+env.close()
+plot_rewards(reward_history)
